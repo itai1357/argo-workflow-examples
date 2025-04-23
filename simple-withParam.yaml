@@ -1,0 +1,125 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  namespace: {{ .Values.namespaceOverride }}
+  name: simple-with-param
+  generateName: simple-with-param-
+spec:
+  serviceAccountName: {{ .Values.serviceAccount }}
+  securityContext:
+    runAsUser: 1000
+    fsGroup: 1000
+  workflowMetadata:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: json-string
+        value: "{}"
+    {{- if ne .Values.environmentType "local" }}
+      - name: gcsBucket
+        valueFrom:
+          configMapKeyRef:
+            name: cas-configmap
+            key: WORKFLOWS_ARTIFACTS_BUCKET
+            optional: false
+    {{- end }}
+  templates:
+    - name: main
+      outputs:
+        parameters:
+          - name: parsed-json
+            valueFrom:
+              expression:
+                "let unparsed = steps['dummy'].outputs.parameters['json-string'];
+                let parsed1 = replace(unparsed, '\\\\\\\\\\\\', '');
+                let parsed2 = replace(parsed1, '[\"\\\\\"', '[');
+                let parsed3 = replace(parsed2, '\\\\\"\"]', ']');
+                let unifiedArray = fromJSON(parsed3); 
+                let hasBlockPr = any(unifiedArray, {.block_pr}); 
+                let hasBlockCicd = any(unifiedArray, {.block_cicd});
+                toJSON({\"hasBlockPr\":hasBlockPr,\"hasBlockCicd\":hasBlockPr})"
+      steps:
+        - - name: input-list
+            template: input-list
+            arguments:
+              parameters:
+                - name: my-list
+                  value: |
+                    [{"key": "k1", "value": "1"}, {"key": "k2", "value": "2"}, {"key": "k3", "value": "3"}]
+        - - name: iteration1
+            template: iteration1
+            arguments:
+              parameters:
+                - name: current-key
+                  value: '{{ `{{item.key}}` }}'
+            withParam: '{{`{{steps.input-list.outputs.parameters.input-list}}`}}'
+        - - name: iteration2
+            template: iteration2
+            arguments:
+              parameters:
+                - name: current-list
+                  value: '{{ `{{item.list}}` }}'
+                - name: current-key
+                  value: '{{ `{{item.key}}` }}'
+            withParam: '{{`{{steps.iteration1.outputs.parameters.output}}`}}'
+      retryStrategy:
+        limit: 5
+        backoff:
+          duration: 2m
+        expression: indexOf(lower(lastRetry.message), "pod was rejected") > -1  or indexOf(lower(lastRetry.message), "unknown (exit code 255)") > -1 or lastRetry.message == "PodInitializing"
+    - name: input-list
+      inputs:
+        parameters:
+          - name: my-list
+      script:
+        image: alpine:latest
+        command: [ sh ]
+        source: |
+          echo '{{ `{{inputs.parameters.my-list}}` }}' > /tmp/json-string.txt
+      outputs:
+        parameters:
+          - name: input-list
+            valueFrom:
+              default: "[]"
+              path: "/tmp/json-string.txt"
+      retryStrategy:
+        limit: 5
+        backoff:
+          duration: 2m
+        expression: indexOf(lower(lastRetry.message), "pod was rejected") > -1  or indexOf(lower(lastRetry.message), "unknown (exit code 255)") > -1
+    - name: iteration1
+      inputs:
+        parameters:
+          - name: current-key
+      script:
+        image: alpine:latest
+        command: [ sh ]
+        source: |
+          echo '{"key": "{{ `{{inputs.parameters.current-key}}` }}", "list": ["{{ `{{inputs.parameters.current-key}}` }}"] }' > /tmp/output.txt
+      outputs:
+        parameters:
+          - name: output
+            valueFrom:
+              default: "{}"
+              path: "/tmp/output.txt"
+      retryStrategy:
+        limit: 5
+        backoff:
+          duration: 2m
+        expression: indexOf(lower(lastRetry.message), "pod was rejected") > -1  or indexOf(lower(lastRetry.message), "unknown (exit code 255)") > -1
+    - name: iteration2
+      inputs:
+        parameters:
+          - name: current-list
+          - name: current-key
+      script:
+        image: alpine:latest
+        command: [ sh ]
+        source: |
+          echo '{{ `{{inputs.parameters.current-list}}` }}'
+          echo '{{ `{{inputs.parameters.current-key}}` }}'
+      retryStrategy:
+        limit: 5
+        backoff:
+          duration: 2m
+        expression: indexOf(lower(lastRetry.message), "pod was rejected") > -1  or indexOf(lower(lastRetry.message), "unknown (exit code 255)") > -1

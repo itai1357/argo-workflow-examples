@@ -1,0 +1,64 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  namespace: {{ .Values.namespaceOverride }}
+  name: simple-json-parser
+  generateName: simple-simple-json-parser-
+spec:
+  serviceAccountName: {{ .Values.serviceAccount }}
+  securityContext:
+    runAsUser: 1000
+    fsGroup: 1000
+  workflowMetadata:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: json-string
+        value: "{}"
+    {{- if ne .Values.environmentType "local" }}
+      - name: gcsBucket
+        valueFrom:
+          configMapKeyRef:
+            name: cas-configmap
+            key: WORKFLOWS_ARTIFACTS_BUCKET
+            optional: false
+    {{- end }}
+  templates:
+    - name: main
+      outputs:
+        parameters:
+          - name: parsed-json
+            valueFrom:
+              parameter: "{{`{{steps.json-parser.outputs.parameters.parsed-json}}`}}"
+      steps:
+        - - name: json-parser
+            template: json-parser
+            arguments:
+              parameters:
+                - name: json-string
+                  value: '{{ `{{workflow.parameters.json-string}}` }}'
+      retryStrategy:
+        limit: 5
+        backoff:
+          duration: 2m
+        expression: indexOf(lower(lastRetry.message), "pod was rejected") > -1  or indexOf(lower(lastRetry.message), "unknown (exit code 255)") > -1 or lastRetry.message == "PodInitializing"
+    - name: json-parser
+      inputs:
+        parameters:
+          - name: json-string
+      script:
+        image: alpine:latest
+        command: [ sh ]
+        source: |
+          echo '{{ `{{inputs.parameters.json-string}}` }}' | jq . | jq -r '.[]' | jq -s .
+      outputs:
+        parameters:
+          - name: parsed-json
+            valueFrom:
+              default: "{}"
+              path: "/dev/stdout"
+      retryStrategy:
+        limit: 5
+        backoff:
+          duration: 2m
+        expression: indexOf(lower(lastRetry.message), "pod was rejected") > -1  or indexOf(lower(lastRetry.message), "unknown (exit code 255)") > -1
